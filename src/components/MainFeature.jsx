@@ -3,6 +3,9 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { toast } from 'react-toastify'
 import { format, isToday, isTomorrow, isPast, parseISO } from 'date-fns'
 import ApperIcon from './ApperIcon'
+import TaskService from '../services/TaskService'
+import CategoryService from '../services/CategoryService'
+import { useSelector } from 'react-redux'
 
 function MainFeature() {
   const [tasks, setTasks] = useState([])
@@ -25,30 +28,90 @@ function MainFeature() {
     categoryId: '1'
   })
 
-  // Load tasks from localStorage on component mount
+  // Loading states for all operations
+  const [isLoadingTasks, setIsLoadingTasks] = useState(false)
+  const [isLoadingCategories, setIsLoadingCategories] = useState(false)
+  const [isSubmittingTask, setIsSubmittingTask] = useState(false)
+  const [isDeletingTask, setIsDeletingTask] = useState(false)
+  const [isTogglingCompletion, setIsTogglingCompletion] = useState(false)
+
+  // Get authentication status
+  const { isAuthenticated } = useSelector((state) => state.user)
+
+  // Load tasks and categories from database on component mount
   useEffect(() => {
-    const savedTasks = localStorage.getItem('taskflow-tasks')
-    if (savedTasks) {
-      setTasks(JSON.parse(savedTasks))
+    if (isAuthenticated) {
+      loadTasks()
+      loadCategories()
     }
-  }, [])
+  }, [isAuthenticated])
 
-  // Save tasks to localStorage whenever tasks change
-  useEffect(() => {
-    localStorage.setItem('taskflow-tasks', JSON.stringify(tasks))
-    updateCategoryTaskCounts()
-  }, [tasks])
+  // Load tasks from database
+  const loadTasks = async () => {
+    try {
+      setIsLoadingTasks(true)
+      const filters = {}
+      
+      if (selectedCategory !== 'all') {
+        filters.category = selectedCategory
+      }
+      
+      if (filterStatus !== 'all') {
+        filters.isCompleted = filterStatus === 'completed'
+      }
+      
+      if (searchTerm) {
+        filters.searchTerm = searchTerm
+      }
 
-  const updateCategoryTaskCounts = () => {
-    const updatedCategories = categories.map(category => ({
-      ...category,
-      taskCount: tasks.filter(task => task.categoryId === category.id && !task.isCompleted).length
-    }))
-    setCategories(updatedCategories)
+      const tasksData = await TaskService.fetchTasks(filters)
+      setTasks(tasksData || [])
+    } catch (error) {
+      console.error('Error loading tasks:', error)
+      toast.error('Failed to load tasks')
+      setTasks([])
+    } finally {
+      setIsLoadingTasks(false)
+    }
   }
 
-  const handleTaskSubmit = (e) => {
+  // Load categories from database
+  const loadCategories = async () => {
+    try {
+      setIsLoadingCategories(true)
+      const categoriesData = await CategoryService.fetchCategories()
+      
+      if (!categoriesData || categoriesData.length === 0) {
+        // Create default categories if none exist
+        const defaultCategories = CategoryService.getDefaultCategories()
+        for (const category of defaultCategories) {
+          await CategoryService.createCategory(category)
+        }
+        // Reload categories after creating defaults
+        const newCategoriesData = await CategoryService.fetchCategories()
+        setCategories(newCategoriesData || [])
+      } else {
+        setCategories(categoriesData)
+      }
+    } catch (error) {
+      console.error('Error loading categories:', error)
+      toast.error('Failed to load categories')
+    } finally {
+      setIsLoadingCategories(false)
+    }
+  }
+
+  // Reload tasks when filters change
+  useEffect(() => {
+    if (isAuthenticated) {
+      loadTasks()
+    }
+  }, [selectedCategory, filterStatus, searchTerm, isAuthenticated])
+
+  const handleTaskSubmit = async (e) => {
     e.preventDefault()
+    
+    if (isSubmittingTask) return
     
     if (!taskForm.title.trim()) {
       toast.error('Please enter a task title')
@@ -60,25 +123,39 @@ function MainFeature() {
       title: taskForm.title.trim(),
       description: taskForm.description.trim(),
       dueDate: taskForm.dueDate,
-      priority: taskForm.priority,
+      due_date: taskForm.dueDate,
       categoryId: taskForm.categoryId,
-      isCompleted: editingTask ? editingTask.isCompleted : false,
-      createdAt: editingTask ? editingTask.createdAt : new Date().toISOString()
-    }
+      category: taskForm.categoryId,
+      is_completed: editingTask ? editingTask.is_completed : false,
+      created_at: editingTask ? editingTask.created_at : new Date().toISOString(),
+      Name: taskForm.title.trim()
 
     if (editingTask) {
-      setTasks(tasks.map(task => task.id === editingTask.id ? taskData : task))
-      toast.success('Task updated successfully!')
-    } else {
-      setTasks([...tasks, taskData])
-      toast.success('Task created successfully!')
-    }
+    try {
+      setIsSubmittingTask(true)
+      
+      if (editingTask) {
+        await TaskService.updateTask(editingTask.Id, taskData)
+        toast.success('Task updated successfully!')
+      } else {
+        await TaskService.createTask(taskData)
+        toast.success('Task created successfully!')
+      }
+      
+      // Reload tasks to get updated data
+      await loadTasks()
+      resetForm()
+    } catch (error) {
+      console.error('Error saving task:', error)
+      toast.error(editingTask ? 'Failed to update task' : 'Failed to create task')
+    } finally {
+      setIsSubmittingTask(false)
 
-    resetForm()
-  }
 
   const resetForm = () => {
     setTaskForm({
+    if (isSubmittingTask) return
+    
       title: '',
       description: '',
       dueDate: '',
@@ -93,28 +170,79 @@ function MainFeature() {
     setTaskForm({
       title: task.title,
       description: task.description,
-      dueDate: task.dueDate,
+      dueDate: task.due_date,
       priority: task.priority,
-      categoryId: task.categoryId
+      categoryId: task.category
     })
     setEditingTask(task)
     setShowTaskForm(true)
   }
 
-  const handleDeleteTask = (taskId) => {
-    setTasks(tasks.filter(task => task.id !== taskId))
-    toast.success('Task deleted successfully!')
+  const handleDeleteTask = async (taskId) => {
+    if (isDeletingTask) return
+    
+    try {
+      setIsDeletingTask(true)
+      await TaskService.deleteTask(taskId)
+      toast.success('Task deleted successfully!')
+      
+      // Reload tasks to get updated data
+      await loadTasks()
+    } catch (error) {
+      console.error('Error deleting task:', error)
+      toast.error('Failed to delete task')
+    } finally {
+      setIsDeletingTask(false)
+    }
   }
 
-  const toggleTaskCompletion = (taskId) => {
-    setTasks(tasks.map(task => 
-      task.id === taskId 
-        ? { ...task, isCompleted: !task.isCompleted }
-        : task
-    ))
+  const toggleTaskCompletion = async (taskId) => {
+    if (isTogglingCompletion) return
     
-    const task = tasks.find(t => t.id === taskId)
-    if (task && !task.isCompleted) {
+    const task = tasks.find(t => t.Id === taskId)
+    if (!task) return
+    
+    try {
+      setIsTogglingCompletion(true)
+      
+      const updatedTaskData = {
+        is_completed: !task.is_completed
+      }
+      
+      await TaskService.updateTask(taskId, updatedTaskData)
+      
+      // Reload tasks to get updated data
+      await loadTasks()
+      
+      if (!task.is_completed) {
+        toast.success('Great job! Task completed! 🎉')
+      } else {
+        toast.info('Task marked as incomplete')
+      }
+    } catch (error) {
+      console.error('Error updating task completion:', error)
+      toast.error('Failed to update task')
+    } finally {
+      setIsTogglingCompletion(false)
+    }
+  }
+
+  // If not authenticated, redirect to login
+  if (!isAuthenticated) {
+    return (
+      <div className="flex items-center justify-center min-h-[400px]">
+        <div className="text-center">
+          <h3 className="text-lg font-medium text-surface-700 dark:text-surface-300 mb-2">
+            Please log in to access your tasks
+          </h3>
+          <p className="text-surface-500 dark:text-surface-400">
+            You need to be authenticated to manage your tasks and categories.
+          </p>
+        </div>
+      </div>
+    )
+  }
+
       toast.success('Great job! Task completed! 🎉')
     } else {
       toast.info('Task marked as incomplete')
@@ -146,14 +274,7 @@ function MainFeature() {
   }
 
   const filteredTasks = tasks.filter(task => {
-    const matchesCategory = selectedCategory === 'all' || task.categoryId === selectedCategory
-    const matchesStatus = filterStatus === 'all' || 
-      (filterStatus === 'completed' && task.isCompleted) ||
-      (filterStatus === 'pending' && !task.isCompleted)
-    const matchesSearch = task.title.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      task.description.toLowerCase().includes(searchTerm.toLowerCase())
-    
-    return matchesCategory && matchesStatus && matchesSearch
+    return true // Filtering is now handled by the service
   })
 
   return (
@@ -174,9 +295,12 @@ function MainFeature() {
             whileHover={{ scale: 1.02, y: -2 }}
             whileTap={{ scale: 0.98 }}
             className="w-full btn-primary flex items-center justify-center space-x-2 mb-4"
+            disabled={isSubmittingTask || isLoadingTasks}
           >
             <ApperIcon name="Plus" className="w-4 h-4" />
-            <span>Add New Task</span>
+            <span>
+              {isSubmittingTask ? 'Creating...' : 'Add New Task'}
+            </span>
           </motion.button>
           
           {/* Search */}
@@ -188,6 +312,7 @@ function MainFeature() {
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
               className="input-field pl-10 text-sm"
+              disabled={isLoadingTasks}
             />
           </div>
 
@@ -201,6 +326,7 @@ function MainFeature() {
                 value={filterStatus}
                 onChange={(e) => setFilterStatus(e.target.value)}
                 className="input-field text-sm"
+                disabled={isLoadingTasks}
               >
                 <option value="all">All Tasks</option>
                 <option value="pending">Pending</option>
@@ -244,10 +370,12 @@ function MainFeature() {
                 }`}
               >
                 <div className="flex items-center space-x-3">
-                  <div className={`w-3 h-3 ${category.color} rounded-full`}></div>
-                  <span className="font-medium">{category.name}</span>
+                  <div className={`w-3 h-3 ${category.color || 'bg-gray-500'} rounded-full`}></div>
+                  <span className="font-medium">{category.Name}</span>
                 </div>
-                <span className="text-sm font-semibold">{category.taskCount}</span>
+                <span className="text-sm font-semibold">
+                  {tasks.filter(task => task.category === category.Id && !task.is_completed).length}
+                </span>
               </motion.button>
             ))}
           </div>
@@ -363,8 +491,12 @@ function MainFeature() {
                       whileHover={{ scale: 1.02 }}
                       whileTap={{ scale: 0.98 }}
                       className="flex-1 btn-primary"
+                      disabled={isSubmittingTask}
                     >
-                      {editingTask ? 'Update Task' : 'Create Task'}
+                      {isSubmittingTask 
+                        ? (editingTask ? 'Updating...' : 'Creating...') 
+                        : (editingTask ? 'Update Task' : 'Create Task')
+                      }
                     </motion.button>
                     <motion.button
                       type="button"
@@ -372,6 +504,7 @@ function MainFeature() {
                       whileHover={{ scale: 1.02 }}
                       whileTap={{ scale: 0.98 }}
                       className="flex-1 btn-secondary"
+                      disabled={isSubmittingTask}
                     >
                       Cancel
                     </motion.button>
@@ -388,14 +521,25 @@ function MainFeature() {
             <h3 className="text-xl font-semibold text-surface-900 dark:text-white">
               {selectedCategory === 'all' 
                 ? 'All Tasks' 
-                : categories.find(c => c.id === selectedCategory)?.name + ' Tasks'
+                : categories.find(c => c.Id === selectedCategory)?.Name + ' Tasks'
               }
             </h3>
             <span className="text-sm text-surface-500 dark:text-surface-400">
+              {isLoadingTasks ? 'Loading...' : 
               {filteredTasks.length} {filteredTasks.length === 1 ? 'task' : 'tasks'}
             </span>
+            </span>
           </div>
-
+          {isLoadingTasks ? (
+            <div className="text-center py-12">
+              <div className="w-16 h-16 mx-auto mb-4 bg-surface-100 dark:bg-surface-700 rounded-full flex items-center justify-center">
+                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>
+              </div>
+              <h4 className="text-lg font-medium text-surface-700 dark:text-surface-300 mb-2">
+                Loading tasks...
+              </h4>
+            </div>
+          ) : filteredTasks.length === 0 ? (
           {filteredTasks.length === 0 ? (
             <motion.div
               initial={{ opacity: 0, y: 20 }}
@@ -425,33 +569,34 @@ function MainFeature() {
             <div className="space-y-3">
               <AnimatePresence>
                 {filteredTasks.map((task, index) => {
-                  const category = categories.find(c => c.id === task.categoryId)
-                  const dateStatus = getDateStatus(task.dueDate)
+                  const category = categories.find(c => c.Id === task.category)
+                  const dateStatus = getDateStatus(task.due_date)
                   
                   return (
                     <motion.div
-                      key={task.id}
+                      key={task.Id}
                       initial={{ opacity: 0, y: 20 }}
                       animate={{ opacity: 1, y: 0 }}
                       exit={{ opacity: 0, x: -20 }}
                       transition={{ delay: index * 0.1 }}
                       whileHover={{ y: -2 }}
-                      className={`task-card group ${task.isCompleted ? 'opacity-60' : ''}`}
+                      className={`task-card group ${task.is_completed ? 'opacity-60' : ''}`}
                     >
                       <div className="flex items-start space-x-4">
                         {/* Checkbox */}
                         <motion.button
-                          onClick={() => toggleTaskCompletion(task.id)}
+                          onClick={() => toggleTaskCompletion(task.Id)}
                           whileHover={{ scale: 1.1 }}
                           whileTap={{ scale: 0.9 }}
                           className="mt-1 flex-shrink-0"
+                          disabled={isTogglingCompletion}
                         >
                           <div className={`w-5 h-5 rounded border-2 flex items-center justify-center transition-all duration-200 ${
-                            task.isCompleted 
+                            task.is_completed 
                               ? 'bg-primary border-primary' 
                               : 'border-surface-300 hover:border-primary'
                           }`}>
-                            {task.isCompleted && (
+                            {task.is_completed && (
                               <ApperIcon name="Check" className="w-3 h-3 text-white" />
                             )}
                           </div>
@@ -461,7 +606,7 @@ function MainFeature() {
                         <div className="flex-1 min-w-0">
                           <div className="flex items-start justify-between mb-2">
                             <h4 className={`font-medium text-surface-900 dark:text-white ${
-                              task.isCompleted ? 'line-through text-surface-500' : ''
+                              task.is_completed ? 'line-through text-surface-500' : ''
                             }`}>
                               {task.title}
                             </h4>
@@ -473,14 +618,16 @@ function MainFeature() {
                                 whileHover={{ scale: 1.1 }}
                                 whileTap={{ scale: 0.9 }}
                                 className="p-1.5 text-surface-400 hover:text-primary hover:bg-primary/10 rounded-lg transition-colors"
+                                disabled={isSubmittingTask || isDeletingTask}
                               >
                                 <ApperIcon name="Edit2" className="w-4 h-4" />
                               </motion.button>
                               <motion.button
-                                onClick={() => handleDeleteTask(task.id)}
+                                onClick={() => handleDeleteTask(task.Id)}
                                 whileHover={{ scale: 1.1 }}
                                 whileTap={{ scale: 0.9 }}
                                 className="p-1.5 text-surface-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors"
+                                disabled={isDeletingTask || isSubmittingTask}
                               >
                                 <ApperIcon name="Trash2" className="w-4 h-4" />
                               </motion.button>
@@ -498,9 +645,9 @@ function MainFeature() {
                             <div className="flex items-center space-x-3">
                               {/* Category */}
                               <div className="flex items-center space-x-1.5">
-                                <div className={`w-2 h-2 ${category?.color} rounded-full`}></div>
+                                <div className={`w-2 h-2 ${category?.color || 'bg-gray-500'} rounded-full`}></div>
                                 <span className="text-xs font-medium text-surface-500 dark:text-surface-400">
-                                  {category?.name}
+                                  {category?.Name}
                                 </span>
                               </div>
 
@@ -511,7 +658,7 @@ function MainFeature() {
                             </div>
 
                             {/* Due Date */}
-                            {task.dueDate && (
+                            {task.due_date && (
                               <div className="flex items-center space-x-1">
                                 <ApperIcon name="Calendar" className="w-3 h-3 text-surface-400" />
                                 <span className={`text-xs font-medium ${dateStatus.color}`}>
